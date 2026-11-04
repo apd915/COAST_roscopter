@@ -8,9 +8,11 @@
 
 #include "param_manager/param_manager.hpp"
 #include "roscopter_msgs/msg/controller_command.hpp"
+#include "roscopter_msgs/msg/tracking_error.hpp"
 #include "roscopter_msgs/msg/trajectory_command.hpp"
 #include "roscopter_msgs/msg/state.hpp"
 #include "rosflight_msgs/msg/status.hpp"
+#include "rosflight_msgs/msg/sim_state.hpp"
 
 using std::placeholders::_1;
 
@@ -36,9 +38,17 @@ private:
 
   // Publishers and Subscribers
   rclcpp::Subscription<roscopter_msgs::msg::State>::SharedPtr state_sub_;
+  rclcpp::Subscription<rosflight_msgs::msg::SimState>::SharedPtr truth_sub_;
+  rosflight_msgs::msg::SimState truth_;
+  bool have_truth_ = false;
   rclcpp::Subscription<roscopter_msgs::msg::TrajectoryCommand>::SharedPtr trajectory_sub_;
   rclcpp::Subscription<rosflight_msgs::msg::Status>::SharedPtr firmware_status_sub_;
   rclcpp::Publisher<roscopter_msgs::msg::ControllerCommand>::SharedPtr cmd_pub_;
+  rclcpp::Publisher<roscopter_msgs::msg::TrackingError>::SharedPtr tracking_error_pub_;
+
+  /** Publishes how far the vehicle is from its commanded trajectory. See TrackingError.msg. */
+  void publish_tracking_error();
+  double peak_position_error_{0.0};
   rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr clear_integrators_srvs_;
 
   // Memory for sharing information between functions

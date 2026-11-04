@@ -1,0 +1,15 @@
+# Default planner limits. Layered after multirotor.yaml, so anything set here wins.
+#
+# This file exists so the `planner_param_file` launch argument always points at a REAL file --
+# ROS 2 launch loads every entry in `parameters=[...]` as a path, so an empty-string default
+# would fail at launch. It restates the values the node already declares, which also makes the
+# operating point visible in one place instead of buried in declare_parameter calls.
+#
+# Swap it for forest_benchmark.yaml to run the SANDO-comparable benchmark:
+#   ros2 launch roscopter roscopter.launch.py \
+#     planner_param_file:=$(ros2 pkg prefix roscopter)/share/roscopter/params/forest_benchmark.yaml
+
+/minimum_snap_manager:
+  ros__parameters:
+    v_max: 3.0
+    a_max: 2.0

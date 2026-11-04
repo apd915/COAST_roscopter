@@ -222,6 +222,24 @@ private:
   SensorNoiseFuncRef baro_measurement_sensor_noise_model;
 
   /**
+   * @brief Predicts the lidar-inertial odometry measurement: NED position of the CG.
+   */
+  Eigen::VectorXf lio_measurement_prediction(const Eigen::VectorXf& state, const Eigen::VectorXf& input);
+  MeasurementModelFuncRef lio_measurement_model;
+
+  /**
+   * @brief Jacobian of the LIO measurement model -- identity on the three position states.
+   */
+  Eigen::MatrixXf lio_measurement_jacobian(const Eigen::VectorXf& state, const Eigen::VectorXf& input);
+  JacobianFuncRef lio_measurement_jacobian_model;
+
+  /**
+   * @brief Sensor noise of the LIO position measurement.
+   */
+  Eigen::MatrixXf lio_measurement_sensor_noise(const Eigen::VectorXf& state, const Eigen::VectorXf& input);
+  SensorNoiseFuncRef lio_measurement_sensor_noise_model;
+
+  /**
    * @brief The number of states to estimate.
    */
   static constexpr int num_states = 12;
@@ -291,6 +309,17 @@ private:
    * @brief The sensor noises for the barometer.
    */
   Eigen::Matrix<float, num_baro_measurements, num_baro_measurements> R_baro_;
+
+  /**
+   * @brief There are 3 LIO measurements: north, east and down position. FAST-LIO publishes no
+   * velocity, so unlike GNSS there are no velocity rows.
+   */
+  static constexpr int num_lio_measurements = 3;
+
+  /**
+   * @brief The sensor noises for the LIO position measurement.
+   */
+  Eigen::Matrix<float, num_lio_measurements, num_lio_measurements> R_lio_;
   
   /**
    * @brief The calculated inclination of the magnetic field at the current location.
@@ -331,6 +360,11 @@ private:
    * @brief Run the GNSS measurement update.
    */
   void gnss_measurement_update_step(const Input& input);
+
+  /**
+   * @brief Run the lidar-inertial odometry measurement update.
+   */
+  void lio_measurement_update_step(const Input& input);
 
   /**
    * @brief Calculates the properties of teh magnetic field at this particular lat lon.

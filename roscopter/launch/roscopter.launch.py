@@ -10,6 +10,15 @@ def generate_launch_description():
     roscopter_dir = get_package_share_directory('roscopter')
     controller_param_file = os.path.join(roscopter_dir, 'params', 'multirotor.yaml')
     estimator_param_file = os.path.join(roscopter_dir, 'params', 'estimator.yaml')
+
+    # Planner limits, layered AFTER controller_param_file so it wins. Defaults restate the
+    # normal operating point; point it at forest_benchmark.yaml for the SANDO-comparable run.
+    planner_param_file_arg = DeclareLaunchArgument(
+        'planner_param_file',
+        default_value=os.path.join(roscopter_dir, 'params', 'planner_default.yaml'),
+        description="Planner limits YAML (e.g. params/forest_benchmark.yaml)."
+    )
+    planner_param_file = LaunchConfiguration('planner_param_file')
     
     hotstart_estimator_arg = DeclareLaunchArgument(
         "hotstart_estimator",
@@ -28,6 +37,7 @@ def generate_launch_description():
     return LaunchDescription([
         state_remap_arg,
         hotstart_estimator_arg,
+        planner_param_file_arg,
         Node(
             package='roscopter',
             executable='controller',
@@ -53,10 +63,10 @@ def generate_launch_description():
         ),
         Node(
             package='roscopter',
-            executable='path_manager',
-            name='path_manager',
+            executable='minimum_snap_manager',
+            name='minimum_snap_manager',
             output='screen',
-            parameters=[controller_param_file],
+            parameters=[controller_param_file, planner_param_file],
             remappings=[('estimated_state', state_remap)]
         ),
         Node(

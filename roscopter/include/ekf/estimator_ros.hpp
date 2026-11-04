@@ -22,6 +22,7 @@
 #include <rosflight_msgs/msg/status.hpp>
 #include <rosflight_msgs/msg/gnss.hpp>
 #include <geometry_msgs/msg/vector3_stamped.hpp>
+#include <nav_msgs/msg/odometry.hpp>
 #include <roscopter_msgs/msg/state.hpp>
 #include <sensor_msgs/msg/imu.hpp>
 #include <sensor_msgs/msg/magnetic_field.hpp>
@@ -82,6 +83,12 @@ protected:
     float mag_x;
     float mag_y;
     float mag_z;
+    /// Lidar-inertial odometry position of the CG, already in this estimator's NED frame
+    /// (see lio_ned_bridge). Position only: FAST-LIO publishes no velocity.
+    bool lio_new = false;
+    float lio_n;
+    float lio_e;
+    float lio_d;
   };
 
   struct Output
@@ -109,7 +116,18 @@ protected:
 
   bool baro_init_ = false;
   
-  float rho_;
+  /// Air density used to scale the barometric altitude (h = -rho*g*p_d). MUST be initialised:
+  /// it is only assigned on the first GPS fix, and only when hotstart_estimator is false, so a
+  /// run without a fix -- or with hotstart on -- previously used whatever was on the stack.
+  ///
+  /// A wrong rho is a SCALE error on altitude, not an offset, so the controller drives the
+  /// mis-scaled estimate onto the command and the vehicle settles proportionally high, by more
+  /// the higher it flies. Measured symptom: vertical error 1.205 m of which 0.856 m (71%) is
+  /// estimator bias, while the controller sees only 0.355 m and is nulling that correctly.
+  ///
+  /// 1.225 kg/m^3 is the ISA sea-level value -- the right default, and within ~1% of the
+  /// computed value anywhere this vehicle flies.
+  float rho_ = 1.225f;
   
   /**
    * @brief Indicates if the magnetometer magnetic field parameters have been initialized.
@@ -142,6 +160,7 @@ private:
   rclcpp::Subscription<rosflight_msgs::msg::Barometer>::SharedPtr baro_sub_;
   rclcpp::Subscription<rosflight_msgs::msg::Status>::SharedPtr status_sub_;
   rclcpp::Subscription<sensor_msgs::msg::MagneticField>::SharedPtr magnetometer_sub_;
+  rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr lio_sub_;
 
   void update();
   void gnssCallback(const rosflight_msgs::msg::GNSS::SharedPtr msg);
@@ -150,6 +169,7 @@ private:
   void update_barometer_calibration(const rosflight_msgs::msg::Barometer::SharedPtr msg);
   void statusCallback(const rosflight_msgs::msg::Status::SharedPtr msg);
   void magnetometerCallback(const sensor_msgs::msg::MagneticField::SharedPtr msg);
+  void lioCallback(const nav_msgs::msg::Odometry::SharedPtr msg);
 
   rclcpp::TimerBase::SharedPtr update_timer_;
   std::chrono::microseconds update_period_;
@@ -159,6 +179,7 @@ private:
   std::string baro_topic_ = "baro";
   std::string status_topic_ = "status";
   std::string magnetometer_topic_ = "magnetometer";
+  std::string lio_odom_topic_ = "lio/odom_ned";
 
   bool gps_new_;
   bool armed_first_time_;                 /**< Arm before starting estimation  */

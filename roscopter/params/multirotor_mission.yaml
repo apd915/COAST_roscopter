@@ -1,42 +1,43 @@
 # WAYPOINTS
 wp:
   type: 1
-  w: [0.0, 0.0, -10.0]
+  w: [0.0, 0.0, -4.0]
   speed: 4.0
-  psi: 2.16
-  use_lla: false
-  hold_seconds: 0.0
-  hold_indefinitely: false
-wp:
-  type: 1
-  w: [20.0, 0.0, -10.0]
-  speed: 4.0
-  psi: 2.16
-  use_lla: false
-  hold_seconds: 0.0
-  hold_indefinitely: false
-wp:
-  type: 0
-  w: [20.0, -20.0, -20.0]
-  speed: 4.0
-  psi: 1.5
+  psi: 0.0
   use_lla: false
   hold_seconds: 5.0
   hold_indefinitely: false
 wp:
   type: 1
-  w: [0.0, -20.0, -20.0]
+  w: [20.0, 0.0, -4.0]
   speed: 4.0
-  psi: 2.16
+  psi: 0.0
   use_lla: false
-  hold_seconds: 0.0
+  hold_seconds: 2.0
   hold_indefinitely: false
 wp:
   type: 0
-  w: [0.0, 0.0, -40.0]
+  w: [-10.0, 10.0, -2.0]
   speed: 4.0
-  psi: 2.16
+  psi: 0.0
   use_lla: false
   hold_seconds: 10.0
   hold_indefinitely: false
+wp:
+  type: 1
+  w: [3.0, -12.0, -4.0]
+  speed: 4.0
+  psi: 0.0
+  use_lla: false
+  hold_seconds: 5.0
+  hold_indefinitely: false
+wp:
+  type: 1
+  w: [0.0, 16.0, -4.0]
+  speed: 4.0
+  psi: 0.0
+  use_lla: false
+  hold_seconds: 5.0
+  hold_indefinitely: false
+
 

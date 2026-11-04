@@ -1,0 +1,100 @@
+# A/B CONTROL for the takeoff-overshoot hypothesis.
+#
+# IDENTICAL to forest_benchmark.yaml except v_max and a_max, which revert to the values the
+# playground environment ran with. The point is to change exactly ONE thing: reverting to
+# planner_default.yaml instead would also move planning_horizon (25 -> 10), map_window_radius
+# (15 -> 25, which alone puts the map update back to ~90 ms and starves dispatch) and the heat
+# field, and the result would be uninterpretable.
+#
+#   forest_benchmark.yaml         v_max 5.0   a_max 20.0   (SANDO Sec. IX-C)
+#   this file                     v_max 3.0   a_max  2.0   (playground)
+#
+# Read the takeoff from the CSV, not from the summary statistics -- the summary mixes the
+# takeoff transient with the traverse, and these runs are short enough that it is dominated by
+# whichever phase happened to last longer.
+#
+# Kinodynamic limits matching SANDO's static-forest benchmark (Sec. IX-C), so travel time and
+# path length can be compared against their Table VI rather than only against our own baselines.
+#
+#   SANDO Sec. IX-C:  v_max 5.0 m/s, a_max 20.0 m/s^2, j_max 100.0 m/s^3
+#
+# Jerk is deliberately NOT limited here -- the QP has no jerk constraint block, so there is
+# nothing to set. Report rho_jerk as "n/a (not constrained)" rather than as 0%: claiming zero
+# violations of a constraint that was never enforced would be wrong, even though the measured
+# jerk may well be inside their bound.
+#
+# BOTH limits are per-axis (L-inf), which is what the MINVO constraint box enforces and what
+# SANDO enforces. Do not compare a vector norm against these numbers.
+#
+# EXPECT THIS TO BE AGGRESSIVE. a_max 20 m/s^2 is over 2 g, against our 0.49 m hull and 0.30 m
+# obstacle margin; SANDO's simulated vehicle has a 0.1 m radius. Tracking error grows with
+# commanded acceleration, and the corridor margin is what absorbs it, so watch tracking_error
+# and the arrival/collision behaviour before trusting a fast T_trav. If the vehicle cannot hold
+# the trajectory at these limits, that is a real result worth reporting -- not something to hide
+# by quietly lowering them.
+
+/minimum_snap_manager:
+  ros__parameters:
+    v_max: 3.0
+    a_max: 2.0
+
+    # The default 10 m horizon is sized for the short legs of the shakeout mission. On a 105 m
+    # traverse it means the planner never looks more than ~1.5 trunk spacings ahead, so it cannot
+    # see around a cluster: it commits to a locally-clear line, discovers the cluster, and backs
+    # out. It also caps the terminal velocity, which is braking-bounded by the run-out at the end
+    # of the last corridor -- a short corridor chain means a slow hand-off to the next replan.
+    #
+    # 15 m is SANDO's value (sando.yaml: horizon 15.0) and it is a real ceiling, not a preference.
+    # 25 m with an 8000-node budget was tried and REVERTED: in a dense forest each replan grew to
+    # roughly 70 ms of the 100 ms period, and because the node runs on a SINGLE-THREADED executor
+    # (rclcpp::spin, one thread shared by the 10 Hz replan timer and the 50 Hz dispatch timer) the
+    # long replans starved setpoint publishing. Measured: trajectory_command fell from ~45 Hz to
+    # 15.4 Hz, north control error went from ~0.09 m to 0.818 m, and the vehicle drifted 1.34 m
+    # off the path laterally while along-track lag stayed at 0.057 m -- i.e. it was not behind the
+    # trajectory, it was being flown open-loop between setpoints.
+    #
+    # Raising the horizon past ~15 m therefore needs the executor fixed first (separate callback
+    # groups under a MultiThreadedExecutor, plus locking on setpoint_deque_/state_/shared_grid_),
+    # not just a bigger node budget.
+    # TEMPORARILY 25 m (SANDO's value is 15). Worth retrying now that the thread is healthy:
+    # when 25 m was tried before, the map update was eating ~90-117 ms of the 100 ms period, so
+    # the extra A* work starved dispatch. That is fixed (map now 11-15 ms, dispatch ~44 Hz), so
+    # the headroom to look further ahead actually exists. A longer horizon is the cheap half of
+    # the fix for getting trapped by a tight corridor -- the real fix is a global planner.
+    # Node budget scaled with it; expansion count grows with goal distance.
+    planning_horizon: 25.0
+    astar_max_nodes: 8000
+    astar_max_time_ms: 30.0
+
+    # Unknown space costs (1 + c) per step against 1 for measured-free, so A* prefers a detour
+    # through mapped space over a direct route through unknown whenever the detour is shorter
+    # than (1 + c) times the direct path. At the default c = 2.0 that tolerance is 3x, which is
+    # far too generous for forward flight: the space AHEAD is always the least-sampled part of
+    # the map, so the search is pushed sideways and backwards into the well-mapped region the
+    # vehicle has already flown through.
+    #
+    # It is not a small effect here. The LiDAR's 3 deg vertical rings are 0.79 m apart at 15 m
+    # and 1.05 m at 20 m, wider than the 0.5 m voxel, so beyond ~10 m the forward volume is
+    # mostly UNKNOWN however long the vehicle has been flying. Measured symptom: A* exhausted its
+    # full 4000-node budget and returned a 14-cell (6.4 m) partial path against a 15 m horizon,
+    # the trajectory was then sized for 6.4 m, and the vehicle crept forward and eventually flew
+    # backwards -- the search had found that retreating through mapped space scored better.
+    #
+    # 0.5 keeps a real preference for measured-free space (a 1.5x detour still wins) without
+    # making forward progress uncompetitive.
+    unknown_traversal_cost: 0.5
+
+    # Worst per-axis constraint violation, in the constraints' own units, at which a
+    # non-converged OSQP iterate is still flown. 0.0147 m/s of velocity error against a 5.0 m/s
+    # limit is 0.3% -- flyable by any measure -- but the default 1e-2 rejected it and burned the
+    # whole retry budget. Loosened to sit above that observed residual while staying negligible
+    # against the corridor margin.
+    qp_accept_violation: 0.02
+
+    # Keep the accumulated map no larger than the planner actually reads. The per-scan rebuild of
+    # the inflated set and KD-tree costs O(occupied voxels), which scales with window AREA, and
+    # at the 25 m default it measured 90 ms/scan rising to 117 ms as the forest map filled --
+    # against a 100 ms period, on the same thread as the 50 Hz dispatch loop. Nothing past
+    # planning_horizon (15 m) is used, so the extra 10 m of radius was pure cost: 25 -> 15 m cuts
+    # the occupied count to roughly 36% of it.
+    map_window_radius: 15.0

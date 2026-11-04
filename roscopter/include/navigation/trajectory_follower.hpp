@@ -34,10 +34,11 @@ private:
   double wrap_within_180(double datum, double angle_to_wrap);
   void saturate_commmand_vector(Eigen::Vector4d& u);
   Eigen::Vector4d compute_control_input(const double pn_cmd, const double pe_cmd, const double pd_cmd, const double psi_cmd,
+                                        const double vn_cmd, const double ve_cmd, const double vd_cmd,
                                         const double vn, const double ve, const double vd);
-  double north_control(const double pn_cmd, const double vn);
-  double east_control(const double pe_cmd, const double ve);
-  double down_control(const double pd_cmd, const double vd);
+  double north_control(const double pn_cmd, const double vn_cmd, const double vn);
+  double east_control(const double pe_cmd, const double ve_cmd, const double ve);
+  double down_control(const double pd_cmd, const double vd_cmd, const double vd);
   double psi_control(const double psi_cmd);
 
   void update_gains() override;

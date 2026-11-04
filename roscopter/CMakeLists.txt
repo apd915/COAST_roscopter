@@ -28,6 +28,8 @@ find_package(std_msgs REQUIRED)
 find_package(std_srvs REQUIRED)
 find_package(sensor_msgs REQUIRED)
 find_package(geometry_msgs REQUIRED)
+find_package(nav_msgs REQUIRED)
+find_package(visualization_msgs REQUIRED)
 pkg_check_modules(YAML_CPP REQUIRED yaml-cpp)
 
 ament_export_include_directories(include ${EIGEN3_INCLUDE_DIRS})
@@ -80,7 +82,7 @@ target_include_directories(estimation_lib
   PUBLIC
     "$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include/ekf>"
     "$<INSTALL_INTERFACE:include/ekf>")
-ament_target_dependencies(estimation_lib rclcpp geometry_msgs rosflight_msgs sensor_msgs Eigen3 roscopter_msgs ament_index_cpp)
+ament_target_dependencies(estimation_lib rclcpp geometry_msgs nav_msgs rosflight_msgs sensor_msgs Eigen3 roscopter_msgs ament_index_cpp)
 install(DIRECTORY include/ekf DESTINATION include)
 install(TARGETS estimation_lib
   EXPORT export_estimation_lib
@@ -95,11 +97,25 @@ ament_export_targets(export_estimation_lib HAS_LIBRARY_TARGET)
 # Estimator
 add_executable(estimator
               src/ekf/estimator_node.cpp)
-ament_target_dependencies(estimator PUBLIC roscopter_msgs rosflight_msgs sensor_msgs rclcpp Eigen3 ament_index_cpp)
+ament_target_dependencies(estimator PUBLIC roscopter_msgs rosflight_msgs sensor_msgs nav_msgs rclcpp Eigen3 ament_index_cpp)
 target_link_libraries(estimator PUBLIC estimation_lib ${ament_LIBRARIES} param_manager ${YAML_CPP_LIBRARIES})
 target_include_directories(estimator PUBLIC include)
 install(TARGETS
   estimator
+  DESTINATION lib/${PROJECT_NAME})
+
+# FAST-LIO odometry -> estimator NED frame
+add_executable(lio_ned_bridge
+  src/ekf/lio_ned_bridge.cpp)
+ament_target_dependencies(lio_ned_bridge rclcpp nav_msgs roscopter_msgs rosflight_msgs Eigen3)
+install(TARGETS lio_ned_bridge
+  DESTINATION lib/${PROJECT_NAME})
+
+# Raw LiDAR scan -> world-NED hit points for the planner
+add_executable(lidar_preprocessor
+  src/perception/lidar_preprocessor.cpp)
+ament_target_dependencies(lidar_preprocessor rclcpp sensor_msgs roscopter_msgs Eigen3)
+install(TARGETS lidar_preprocessor
   DESTINATION lib/${PROJECT_NAME})
 
 # External attitude transcriber
@@ -143,6 +159,27 @@ install(
   TARGETS path_manager
   DESTINATION lib/${PROJECT_NAME})
 
+# Minimum Snap Engine
+set(BUILD_PYTHON_BINDINGS OFF)
+add_subdirectory(/home/apd915/Documents/B-Splines/bspline_generator/Minimum-Snap-Trajectories/cpp minimum_snap)
+
+# min_snap_engine is a STATIC library -- it is linked into minimum_snap_manager at build
+# time, so there is nothing to install and nothing to find at runtime. Installing it as a
+# shared object previously meant two copies existed (this one and the planner's own
+# standalone build), and whichever the loader found first won.
+
+# Minimum Snap Manager
+add_executable(minimum_snap_manager
+  src/navigation/minimum_snap_manager.cpp)
+ament_target_dependencies(minimum_snap_manager rclcpp rclpy roscopter_msgs std_srvs sensor_msgs nav_msgs visualization_msgs rosflight_msgs)
+target_link_libraries(minimum_snap_manager ${ament_LIBRARIES} param_manager ${YAML_CPP_LIBRARIES} min_snap_engine)
+target_include_directories(minimum_snap_manager PUBLIC 
+  /home/apd915/Documents/B-Splines/bspline_generator/Minimum-Snap-Trajectories/cpp/include
+)
+install(
+  TARGETS minimum_snap_manager
+  DESTINATION lib/${PROJECT_NAME})
+
 # Path Planner
 add_executable(path_planner
   src/navigation/path_planner.cpp)
@@ -161,7 +198,24 @@ if(BUILD_TESTING)
   target_include_directories(estimator_test PUBLIC
     include
   )
-  target_link_libraries(estimator_test estimation_lib param_manager) 
+  target_link_libraries(estimator_test estimation_lib param_manager)
+
+  # Waypoint-arrival backstop. Header-only and free of ROS types precisely so its must-fire /
+  # must-not-fire scenarios can be covered here rather than only in flight.
+  ament_add_gtest(arrival_monitor_test test/arrival_monitor_test.cpp)
+  target_include_directories(arrival_monitor_test PUBLIC include)
+
+  ament_add_gtest(collision_monitor_test test/collision_monitor_test.cpp)
+  target_include_directories(collision_monitor_test PUBLIC include)
+  ament_target_dependencies(collision_monitor_test rclcpp)
+
+  ament_add_gtest(route_churn_test test/route_churn_test.cpp)
+  target_include_directories(route_churn_test PUBLIC include)
+  ament_target_dependencies(route_churn_test rclcpp Eigen3)
+
+  ament_add_gtest(route_gate_test test/route_gate_test.cpp)
+  target_include_directories(route_gate_test PUBLIC include)
+  ament_target_dependencies(route_gate_test rclcpp Eigen3)
 
   find_package(ament_lint_auto REQUIRED)
   # the following line skips the linter which checks for copyrights

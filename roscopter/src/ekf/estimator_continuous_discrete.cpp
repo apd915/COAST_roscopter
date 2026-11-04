@@ -38,6 +38,7 @@ EstimatorContinuousDiscrete::EstimatorContinuousDiscrete()
     , R_mag_(Eigen::Matrix<float,num_mag_measurements, num_mag_measurements>::Zero())
     , R_tilt_(Eigen::Matrix<float,num_tilt_mag_measurements, num_tilt_mag_measurements>::Zero())
     , R_baro_(Eigen::Matrix<float,num_baro_measurements, num_baro_measurements>::Zero())
+    , R_lio_(Eigen::Matrix<float,num_lio_measurements, num_lio_measurements>::Zero())
 {
   // This binds the various functions for the measurement and dynamic models and their jacobians,
   // to a reference that is efficient to pass to the functions used to do the estimation.
@@ -96,6 +97,7 @@ void EstimatorContinuousDiscrete::estimate(const Input & input, Output & output)
   mag_measurement_update_step(input);
   baro_measurement_update_step(input);
   gnss_measurement_update_step(input);
+  lio_measurement_update_step(input);
 
   check_sensors();
   check_estimate(input);
@@ -205,6 +207,13 @@ void EstimatorContinuousDiscrete::gnss_measurement_update_step(const Input& inpu
 {
   Eigen::Vector<float, 1> _; // This is used when no inputs are needed.
 
+  // use_gnss_updates gates the CORRECTION only. GPS is still read for initialisation -- the
+  // first fix sets the lat/lon origin and the WMM lookup the magnetometer heading depends on,
+  // so turning GPS off entirely would leave the estimator unable to start.
+  if (!params_.get_bool("use_gnss_updates")) {
+    return;
+  }
+
   // Only update if new GPS information is available.
   if (input.gps_new && gps_init_) {
     // Measurements for the positional states.
@@ -214,6 +223,21 @@ void EstimatorContinuousDiscrete::gnss_measurement_update_step(const Input& inpu
     std::tie(P_, xhat_) = measurement_update(xhat_, _, gnss_measurement_model, y_gps,
                                              gnss_measurement_jacobian_model, gnss_measurement_sensor_noise_model, P_);
   }
+}
+
+void EstimatorContinuousDiscrete::lio_measurement_update_step(const Input& input)
+{
+  if (!input.lio_new || !params_.get_bool("use_lio")) {
+    return;
+  }
+
+  Eigen::Vector<float, num_lio_measurements> y_lio;
+  y_lio << input.lio_n, input.lio_e, input.lio_d;
+
+  Eigen::Vector<float, 1> _;
+
+  std::tie(P_, xhat_) = measurement_update(xhat_, _, lio_measurement_model, y_lio,
+                                           lio_measurement_jacobian_model, lio_measurement_sensor_noise_model, P_);
 }
 
 // ======== PREDICITON STEP EQUATIONS ========
@@ -471,6 +495,27 @@ Eigen::MatrixXf EstimatorContinuousDiscrete::gnss_measurement_sensor_noise(const
   R = R_gnss_;
 
   return R;
+}
+
+// ======== LIO MEASUREMENT STEP EQUATIONS========
+// These are passed by reference to the LIO measurement update step.
+Eigen::VectorXf EstimatorContinuousDiscrete::lio_measurement_prediction(const Eigen::VectorXf& state, const Eigen::VectorXf& input)
+{
+  // The bridge has already moved the measurement to the CG and into this NED frame, so the
+  // prediction is the position states themselves.
+  return state.block<num_lio_measurements, 1>(0, 0);
+}
+
+Eigen::MatrixXf EstimatorContinuousDiscrete::lio_measurement_jacobian(const Eigen::VectorXf& state, const Eigen::VectorXf& input)
+{
+  Eigen::Matrix<float, num_lio_measurements, num_states> C = Eigen::Matrix<float, num_lio_measurements, num_states>::Zero();
+  C.block<3,3>(0,0) = Eigen::Matrix3f::Identity();
+  return C;
+}
+
+Eigen::MatrixXf EstimatorContinuousDiscrete::lio_measurement_sensor_noise(const Eigen::VectorXf& state, const Eigen::VectorXf& input)
+{
+  return R_lio_;
 }
 
 // ======== MEASUREMENT UPDATE HELPER FUNCTIONS========
@@ -786,6 +831,10 @@ void EstimatorContinuousDiscrete::update_measurement_model_parameters()
   
   R_baro_(0,0) = powf(sigma_static_press,2);
 
+  R_lio_(0,0) = powf(params_.get_double("sigma_n_lio"), 2);
+  R_lio_(1,1) = powf(params_.get_double("sigma_e_lio"), 2);
+  R_lio_(2,2) = powf(params_.get_double("sigma_d_lio"), 2);
+
   R_mag_(0,0) = powf(sigma_mag,2);
   R_mag_(1,1) = powf(sigma_mag,2);
   R_mag_(2,2) = powf(sigma_mag,2);
@@ -810,6 +859,15 @@ void EstimatorContinuousDiscrete::declare_parameters()
   params_.declare_double("sigma_mag", 0.004);
   params_.declare_double("sigma_tilt_mag", radians(0.02));
   params_.declare_double("sigma_accel", .025 * 9.81);
+
+  // Lidar-inertial odometry (FAST-LIO via lio_ned_bridge). OFF by default so every existing
+  // launch is unchanged. 5 cm is ~2x the jitter measured with the Mid-360S on the bench.
+  params_.declare_bool("use_lio", false);
+  params_.declare_double("sigma_n_lio", 0.05);
+  params_.declare_double("sigma_e_lio", 0.05);
+  params_.declare_double("sigma_d_lio", 0.05);
+  // false = GPS still initialises the estimator but no longer corrects it (GPS-denied).
+  params_.declare_bool("use_gnss_updates", true);
 
   // Low pass filter parameters
   params_.declare_double("gyro_cutoff_freq", 20.0);
@@ -896,6 +954,10 @@ void EstimatorContinuousDiscrete::bind_functions()
   baro_measurement_model = std::bind(&This::baro_measurement_prediction, this, _1, _2);
   baro_measurement_jacobian_model = std::bind(&This::baro_measurement_jacobian, this, _1, _2);
   baro_measurement_sensor_noise_model = std::bind(&This::baro_measurement_sensor_noise, this, _1, _2);
+
+  lio_measurement_model = std::bind(&This::lio_measurement_prediction, this, _1, _2);
+  lio_measurement_jacobian_model = std::bind(&This::lio_measurement_jacobian, this, _1, _2);
+  lio_measurement_sensor_noise_model = std::bind(&This::lio_measurement_sensor_noise, this, _1, _2);
 }
 
 } // namespace roscopter

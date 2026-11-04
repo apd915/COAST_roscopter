@@ -17,9 +17,18 @@ TrajectoryFollowerROS::TrajectoryFollowerROS()
 {
   // Instantiate publishers and subscribers
   state_sub_ = this->create_subscription<roscopter_msgs::msg::State>("estimated_state", 1, std::bind(&TrajectoryFollowerROS::state_callback, this, _1));
+
+  // Sim-only. Absent on hardware, in which case has_truth stays false and the truth fields
+  // are left at zero rather than silently reporting the estimate as if it were truth.
+  truth_sub_ = this->create_subscription<rosflight_msgs::msg::SimState>(
+    "sim/truth_state", 1, [this](const rosflight_msgs::msg::SimState::SharedPtr msg) {
+      truth_ = *msg;
+      have_truth_ = true;
+    });
   trajectory_sub_ = this->create_subscription<roscopter_msgs::msg::TrajectoryCommand>("trajectory_command", 1, std::bind(&TrajectoryFollowerROS::cmd_callback, this, _1));
   firmware_status_sub_ = this->create_subscription<rosflight_msgs::msg::Status>("status", 1, std::bind(&TrajectoryFollowerROS::status_callback, this, _1));
   cmd_pub_ = this->create_publisher<roscopter_msgs::msg::ControllerCommand>("high_level_command", 1);
+  tracking_error_pub_ = this->create_publisher<roscopter_msgs::msg::TrackingError>("tracking_error", 1);
 
   // Clear integrators service
   clear_integrators_srvs_ = this->create_service<std_srvs::srv::Trigger>(
@@ -71,6 +80,7 @@ void TrajectoryFollowerROS::state_callback(const roscopter_msgs::msg::State &msg
   roscopter_msgs::msg::ControllerCommand output_cmd = manage_trajectory(input_cmd_, dt);
 
   publish_command(output_cmd);
+  publish_tracking_error();
 }
 
 double TrajectoryFollowerROS::compute_dt(double now)
@@ -98,6 +108,65 @@ void TrajectoryFollowerROS::cmd_callback(const roscopter_msgs::msg::TrajectoryCo
 void TrajectoryFollowerROS::status_callback(const rosflight_msgs::msg::Status &msg)
 {
   firmware_status_ = msg;
+}
+
+void TrajectoryFollowerROS::publish_tracking_error()
+{
+  roscopter_msgs::msg::TrackingError msg;
+  msg.header.stamp = this->get_clock()->now();
+
+  // Commanded minus actual. xhat_ is NED, and TrajectoryCommand.position is NED, so these
+  // are directly comparable with no frame conversion.
+  const double en = input_cmd_.position[0] - xhat_.p_n;
+  const double ee = input_cmd_.position[1] - xhat_.p_e;
+  const double ed = input_cmd_.position[2] - xhat_.p_d;
+  msg.position_error = {en, ee, ed};
+  msg.position_error_norm = std::sqrt(en * en + ee * ee + ed * ed);
+
+  // xhat_ velocities are BODY frame; rotate to inertial so the comparison against the
+  // (inertial) commanded velocity is meaningful.
+  Eigen::Quaterniond q_body_to_inertial(xhat_.quat.w, xhat_.quat.x, xhat_.quat.y, xhat_.quat.z);
+  Eigen::Vector3d v_inertial = q_body_to_inertial * Eigen::Vector3d(xhat_.v_x, xhat_.v_y, xhat_.v_z);
+  const double vn = input_cmd_.velocity[0] - v_inertial.x();
+  const double ve = input_cmd_.velocity[1] - v_inertial.y();
+  const double vd = input_cmd_.velocity[2] - v_inertial.z();
+  msg.velocity_error = {vn, ve, vd};
+  msg.velocity_error_norm = std::sqrt(vn * vn + ve * ve + vd * vd);
+
+  // The clearance the planner inflates its corridors by. Kept as a parameter rather than
+  // hard-coded so it can be matched to the planner's drone_physical_radius; if the two ever
+  // disagree, margin_exceeded is measuring against the wrong thing.
+  msg.safety_margin = params.get_double("safety_margin");
+  msg.margin_exceeded = msg.position_error_norm > msg.safety_margin;
+
+  peak_position_error_ = std::max(peak_position_error_, msg.position_error_norm);
+  msg.peak_position_error = peak_position_error_;
+
+  // Separate CONTROL error from ESTIMATOR error. Everything above is measured against
+  // estimated_state -- the very signal the controller regulates -- so a biased estimate makes
+  // position_error read small while the aircraft is visibly off the trajectory. Tightening
+  // gains in that case only tracks the wrong number harder.
+  msg.has_truth = have_truth_;
+  if (have_truth_) {
+    const double tn = input_cmd_.position[0] - truth_.pose.position.x;
+    const double te = input_cmd_.position[1] - truth_.pose.position.y;
+    const double td = input_cmd_.position[2] - truth_.pose.position.z;
+    msg.true_position_error = {tn, te, td};
+    msg.true_position_error_norm = std::sqrt(tn * tn + te * te + td * td);
+
+    const double bn = truth_.pose.position.x - xhat_.p_n;
+    const double be = truth_.pose.position.y - xhat_.p_e;
+    const double bd = truth_.pose.position.z - xhat_.p_d;
+    msg.estimator_error = {bn, be, bd};
+    msg.estimator_error_norm = std::sqrt(bn * bn + be * be + bd * bd);
+
+    // The guarantee is about where the vehicle IS, not where it thinks it is.
+    msg.margin_exceeded = msg.true_position_error_norm > msg.safety_margin;
+    peak_position_error_ = std::max(peak_position_error_, msg.true_position_error_norm);
+    msg.peak_position_error = peak_position_error_;
+  }
+
+  tracking_error_pub_->publish(msg);
 }
 
 void TrajectoryFollowerROS::publish_command(roscopter_msgs::msg::ControllerCommand &command)

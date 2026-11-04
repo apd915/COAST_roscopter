@@ -25,11 +25,13 @@ find_package(geometry_msgs REQUIRED)
 ### SET MSG AND SRV FILE DEFINITIONS ### 
 
 set(msg_files
+  "msg/ComputationTimes.msg"
   "msg/ControllerCommand.msg"
   "msg/ControllerInternals.msg"
   "msg/PoseEuler.msg"
   "msg/Bool.msg"
   "msg/State.msg"
+  "msg/TrackingError.msg"
   "msg/TrajectoryCommand.msg"
   "msg/Waypoint.msg"
 )

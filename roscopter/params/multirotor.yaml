@@ -61,6 +61,25 @@
     pos_d_to_vel_kd: 0.4
 
     # Saturation limits
+    #
+    # RAISED 25 -> 45 deg. Tilt, not thrust, is what bounds horizontal acceleration:
+    #     a_h(max) = g * tan(tilt)   ->  25 deg = 4.57 m/s^2,  45 deg = 9.81 m/s^2
+    # while the planner commands 6.4-10.2 m/s^2 at v_max 8 and forest_benchmark.yaml declares
+    # a_max 20.0. At 25 deg the vehicle could use 23% of its declared limit, so every aggressive
+    # trajectory was unflyable by construction.
+    #
+    # Measured consequence, hard s0 at v_max 8: the moment the traverse begins the command asks
+    # for 6.35 m/s^2 (needs 32.9 deg), the attitude loop saturates, and the thrust computation --
+    # which solves for the tilt it ASKED for -- is now solving for a geometry the vehicle is not
+    # in. Thrust oscillated 15-32 N around a 34.3 N hover, altitude swung from 3.4 m to 6.95 m
+    # with the commanded altitude flat at 3.0 m throughout, and it took ~6 s to damp out.
+    #
+    # 45 deg is the controller's OWN default (controller_cascading_pid.cpp declares 45.0); this
+    # file was overriding it down. The airframe is not the constraint: thrust-to-weight is 4.19,
+    # giving 31 m/s^2 vertical and 39.9 m/s^2 horizontal at full tilt.
+    #
+    # Revert to 25.0 if attitude tracking or the firmware rate loops cannot hold it -- a tilt
+    # limit that the inner loop cannot follow is worse than one that is merely conservative.
     max_roll_deg: 25.0
     max_pitch_deg: 25.0
 
@@ -92,16 +111,38 @@
 
 /trajectory_follower:
   ros__parameters:
-    u_n_kp: 1.5
-    u_n_ki: 0.01
-    u_n_kd: 1.0
+    # --- Horizontal position loop -------------------------------------------------
+    # The PID output here is an ACCELERATION and manage_trajectory already feeds the
+    # reference acceleration forward, so the tracking-error dynamics reduce to
+    #     e_ddot + kd*e_dot + kp*e = 0   ->   omega_n = sqrt(kp),  zeta = kd/(2*sqrt(kp))
+    #
+    # Baseline was kp 1.5 / kd 1.0  ->  omega_n 1.22 rad/s, zeta 0.41, ~8 s to settle:
+    # underdamped and far too slow to hold a 3 m/s trajectory inside the ~0.49 m corridor
+    # margin the SFC guarantee depends on.
+    #
+    # Retuned to omega_n ~2.1 rad/s, zeta ~0.80 (~2.4 s settle), deliberately matching the
+    # DOWN axis below, which already flies well on this airframe -- so this is not a
+    # speculative target, it is the tuning we know this vehicle tolerates.
+    # REVERT VALUES: u_n/u_e kp 1.5, ki 0.01, kd 1.0
+    u_n_kp: 4.5
+    u_n_ki: 0.03
+    u_n_kd: 3.4
 
-    u_e_kp: 1.5
-    u_e_ki: 0.01
-    u_e_kd: 1.0
+    u_e_kp: 4.5
+    u_e_ki: 0.03
+    u_e_kd: 3.4
 
+    # Down axis: kp/kd left ALONE (omega_n 2.0 rad/s, zeta 0.875 -- already well damped).
+    # ki raised 0.05 -> 0.30 on 2026-08-20. At 0.05 the integrator needed ~80 s to absorb the
+    # measured 0.524 m steady-state offset, against legs lasting 14-25 s -- so it never acted
+    # within a leg and the vehicle held a constant offset ABOVE the commanded path. 0.30 gives
+    # ~13 s. Measured with tracking_diagnostic.py: 64% of vertical error was error the
+    # CONTROLLER COULD SEE (|err_est_d| 0.524 of |err_true_d| 0.822), with rc_override at 0%
+    # on every leg, so the integrator was running normally and simply too slow.
+    # Watch the first climb for overshoot; if it appears, back off to 0.15 (~27 s) rather than
+    # reverting, since 0.05 is demonstrably too slow to do anything.
     u_d_kp: 4.0
-    u_d_ki: 0.05
+    u_d_ki: 0.30
     u_d_kd: 3.5
 
     yaw_to_rate_kp: 2.0

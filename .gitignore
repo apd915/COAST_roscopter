@@ -11,3 +11,8 @@ roscopter/logs/
 .vscode/
 .idea/
 hotstart
+
+# colcon output when building from inside the package directory
+roscopter/build/
+roscopter/install/
+roscopter/log/

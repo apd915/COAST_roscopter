@@ -1,3 +1,4 @@
+#include <algorithm>
 #include "navigation/trajectory_follower.hpp"
 
 namespace roscopter
@@ -39,6 +40,42 @@ void TrajectoryFollower::declare_params()
   params.declare_double("yaw_to_rate_ki", 0.002);
   params.declare_double("yaw_to_rate_kd", 0.2);
 
+  // Obstacle clearance the planner inflates its SFCs by (its drone_physical_radius). Used
+  // only to flag when tracking error has eaten the margin the safety argument depends on.
+  // Saturation on each position PID's output, m/s^2. This is NOT cosmetic: SimplePID's
+  // anti-windup is gated on the output actually saturating
+  //
+  //     if (u != u_sat && fabs(i_term) > ...) { integrator_ = ...; }
+  //
+  // and set_gains() defaults max_u/min_u to +/-DBL_MAX. Calling it with four arguments -- as
+  // this file did -- makes the limits infinite, so u == u_sat always, that branch can NEVER
+  // execute, and the integrator accumulates without bound.
+  //
+  // The cost shows up at handover. The commanded altitude steps to the first waypoint while the
+  // vehicle is still on the ground, so u_d sees a ~3 m error; at u_d_ki 0.30 the integrator
+  // reaches ~6 within a couple of seconds and then can only be unwound by the vehicle sitting
+  // PAST the target. Observed as a large vertical overshoot on activation followed by 5-7 s of
+  // recovery, and as a 3-6 m peak_true in the tracking summary on every run.
+  //
+  // 10 m/s^2 is roughly 1 g of correction ON TOP OF the trajectory's own feedforward
+  // acceleration, which is far more authority than the follower legitimately needs and still
+  // engages the windup guard well before the integrator can run away.
+  // 6.0 m/s^2, chosen to MATCH the downward authority rather than exceed it.
+  //
+  // saturate_commmand_vector caps u[2] at max_commanded_down_accel_in_gs * g, which limits
+  // DOWNWARD acceleration to g*(1 + max_commanded_down_accel_in_gs) = 5.89 m/s^2 at the -0.4
+  // default. Upward acceleration has no such cap. That asymmetry is what makes the takeoff
+  // overshoot: at handover the vehicle sits 3 m below the commanded altitude, u_d_kp 4.0 turns
+  // that into a 12 m/s^2 upward command, and the resulting climb can only be arrested at
+  // 5.89 m/s^2 -- so the vehicle sails past. From 5 m/s it needs 2.1 m to stop; from 8 m/s,
+  // 5.4 m. Bounding the integrator alone did not fix it, because the proportional term is doing
+  // most of the work.
+  //
+  // Matching the two makes any climb the controller commands one it can also undo. Raise it only
+  // together with max_commanded_down_accel_in_gs, or the asymmetry comes back.
+  params.declare_double("max_accel_cmd", 6.0);
+
+  params.declare_double("safety_margin", 0.49);
   params.declare_double("down_command_window", 3.0);
   params.declare_double("max_commanded_down_accel_in_gs", -0.4);
 }
@@ -50,21 +87,29 @@ void TrajectoryFollower::update_gains()
 
   double P, I, D, tau;
 
+  // Symmetric output limits, so SimplePID's anti-windup guard can actually engage. See
+  // max_accel_cmd in declare_params().
+  // Never allow more upward authority than can be undone downward -- see max_accel_cmd.
+  const double g = params.get_double("gravity");
+  const double down_cap = g * (1.0 + params.get_double("max_commanded_down_accel_in_gs"));
+  const double u_max = std::min(params.get_double("max_accel_cmd"), down_cap);
+  const double u_min = -u_max;
+
   tau = params.get_double("tau");
   P = params.get_double("u_n_kp");
   I = params.get_double("u_n_ki");
   D = params.get_double("u_n_kd");
-  PID_u_n_.set_gains(P, I, D, tau);
+  PID_u_n_.set_gains(P, I, D, tau, u_max, u_min);
 
   P = params.get_double("u_e_kp");
   I = params.get_double("u_e_ki");
   D = params.get_double("u_e_kd");
-  PID_u_e_.set_gains(P, I, D, tau);
+  PID_u_e_.set_gains(P, I, D, tau, u_max, u_min);
 
   P = params.get_double("u_d_kp");
   I = params.get_double("u_d_ki");
   D = params.get_double("u_d_kd");
-  PID_u_d_.set_gains(P, I, D, tau);
+  PID_u_d_.set_gains(P, I, D, tau, u_max, u_min);
 
   P = params.get_double("yaw_to_rate_kp");
   I = params.get_double("yaw_to_rate_ki");
@@ -97,6 +142,9 @@ roscopter_msgs::msg::ControllerCommand TrajectoryFollower::manage_trajectory(ros
                                                   input_cmd.position[1],
                                                   input_cmd.position[2],
                                                   input_cmd.psi,
+                                                  input_cmd.velocity[0],
+                                                  input_cmd.velocity[1],
+                                                  input_cmd.velocity[2],
                                                   inertial_vels[0],
                                                   inertial_vels[1],
                                                   inertial_vels[2]);
@@ -185,32 +233,35 @@ Eigen::Vector4d TrajectoryFollower::compute_control_input(const double pn_cmd,
                                                           const double pe_cmd,
                                                           const double pd_cmd,
                                                           const double psi_cmd,
+                                                          const double vn_cmd,
+                                                          const double ve_cmd,
+                                                          const double vd_cmd,
                                                           const double vn,
                                                           const double ve,
                                                           const double vd)
 {
   // PID controller for now
-  double u_n = north_control(pn_cmd, vn);
-  double u_e = east_control(pe_cmd, ve);
-  double u_d = down_control(pd_cmd, vd);
+  double u_n = north_control(pn_cmd, vn_cmd, vn);
+  double u_e = east_control(pe_cmd, ve_cmd, ve);
+  double u_d = down_control(pd_cmd, vd_cmd, vd);
   double r = psi_control(psi_cmd);
 
   return Eigen::Vector4d(u_n, u_e, u_d, r);
 }
 
-double TrajectoryFollower::north_control(const double pn_cmd, const double vn)
+double TrajectoryFollower::north_control(const double pn_cmd, const double vn_cmd, const double vn)
 {
   // North control effort
-  return PID_u_n_.compute_pid(pn_cmd, xhat_.p_n, dt_, vn);
+  return PID_u_n_.compute_pid(pn_cmd, xhat_.p_n, dt_, -(vn_cmd - vn));
 }
 
-double TrajectoryFollower::east_control(const double pe_cmd, const double ve)
+double TrajectoryFollower::east_control(const double pe_cmd, const double ve_cmd, const double ve)
 {
   // East control effort
-  return PID_u_e_.compute_pid(pe_cmd, xhat_.p_e, dt_, ve);
+  return PID_u_e_.compute_pid(pe_cmd, xhat_.p_e, dt_, -(ve_cmd - ve));
 }
 
-double TrajectoryFollower::down_control(const double pd_cmd, const double vd)
+double TrajectoryFollower::down_control(const double pd_cmd, const double vd_cmd, const double vd)
 {
   // Saturate the down command (only when positive) to the maximum down command window.
   // This helps to ensure that the copter maintains a controllable down velocity when descending
@@ -221,7 +272,7 @@ double TrajectoryFollower::down_control(const double pd_cmd, const double vd)
   }
 
   // Down control effort
-  return PID_u_d_.compute_pid(actual_down_cmd, xhat_.p_d, dt_, vd);
+  return PID_u_d_.compute_pid(actual_down_cmd, xhat_.p_d, dt_, -(vd_cmd - vd));
 }
 
 double TrajectoryFollower::psi_control(const double psi_cmd)

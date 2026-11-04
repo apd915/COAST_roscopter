@@ -1,0 +1,39 @@
+# Static forest benchmark mission -- two waypoints, matching SANDO Sec. IX-C.
+#
+# Route and altitude are theirs: start (0, 0, 3) -> goal (105, 0, 3), z positive-up in the
+# paper, so -3.0 here because roscopter waypoints are NED. The 100 x 40 m obstacle field lies
+# between them; the goal sits 5 m past its far edge.
+#
+# Deliberately two waypoints and nothing else. The benchmark has to attribute planner and
+# tracking statistics to ONE long traverse through a known obstacle density -- the multi-leg
+# mission in multirotor_mission.yaml mixes leg lengths, altitudes and turn geometry, which is
+# useful for shakeout but makes environments incomparable to each other.
+#
+# Keep both waypoints at the same altitude. Trunks are 6 m and cruise is 3 m specifically so
+# overflight is not a shortcut; a climb would let the planner cheat the obstacle density and
+# the numbers would stop meaning anything.
+#
+# Pair with rosflight_sim's params/forest_{easy,medium,hard}.yaml (seed 0), or
+# params/forests/forest_<level>_s<N>.yaml for the full 10-seeds-per-level protocol.
+#
+# NOTE ON COMPARABILITY: SANDO ran this at v_max 5.0 m/s, a_max 20.0 m/s^2, j_max 100 m/s^3.
+# Our defaults are v_max 3.0 and a_max 2.0, so travel time is NOT comparable to their Table VI
+# without matching the limits. Success rate, computation time and constraint-violation rates
+# are comparable as-is.
+
+wp:
+  type: 1
+  w: [0.0, 0.0, -3.0]
+  speed: 4.0
+  psi: 0.0
+  use_lla: false
+  hold_seconds: 2.0
+  hold_indefinitely: false
+wp:
+  type: 1
+  w: [105.0, 0.0, -3.0]
+  speed: 4.0
+  psi: 0.0
+  use_lla: false
+  hold_seconds: 5.0
+  hold_indefinitely: false

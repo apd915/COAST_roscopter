@@ -19,6 +19,8 @@ EstimatorROS::EstimatorROS()
     status_topic_, 10, std::bind(&EstimatorROS::statusCallback, this, std::placeholders::_1));
   magnetometer_sub_ = this->create_subscription<sensor_msgs::msg::MagneticField>(
     magnetometer_topic_, 10, std::bind(&EstimatorROS::magnetometerCallback, this, std::placeholders::_1));
+  lio_sub_ = this->create_subscription<nav_msgs::msg::Odometry>(
+    lio_odom_topic_, 10, std::bind(&EstimatorROS::lioCallback, this, std::placeholders::_1));
 
   init_static_ = 0;
   baro_count_ = 0;
@@ -151,6 +153,7 @@ void EstimatorROS::update()
   input_.gps_new = false;
   input_.mag_new = false;
   input_.baro_new = false;
+  input_.lio_new = false;
   
   // Create estimated state message and publish it.
   roscopter_msgs::msg::State msg = roscopter_msgs::msg::State();
@@ -218,9 +221,31 @@ void EstimatorROS::gnssCallback(const rosflight_msgs::msg::GNSS::SharedPtr msg)
       rho_ = 1.225 * pow(pressure_at_alt / 101325.0, 0.809736894596450);
       
       // If the parameter is in use override the pressure at altitude calculation.
+      const double rho_from_atmosphere = rho_;
       float rho = params_.get_double("rho");
       if (rho > 0) {
         rho_ = rho;
+      }
+
+      // Log it. rho scales the baro->altitude conversion (h = -rho*g*p_d), so a wrong value is
+      // a SCALE error on altitude, not an offset: the controller drives the mis-scaled estimate
+      // onto the command and the vehicle settles proportionally high or low, by more the higher
+      // it flies. That is invisible in tracking statistics -- the baro bias random walk is
+      // larger than the systematic error over a typical flight, so no single run can separate
+      // them. The only cheap way to know which value is in force is to print it.
+      if (rho > 0) {
+        RCLCPP_WARN(this->get_logger(),
+                    "Baro density OVERRIDDEN by the 'rho' parameter: using %.4f kg/m^3 instead "
+                    "of %.4f computed for %.0f m. Altitude will read %.1f%% off and the vehicle "
+                    "will fly proportionally %s. Unset 'rho' unless this is deliberate.",
+                    rho_, rho_from_atmosphere, init_alt_,
+                    100.0 * (rho_from_atmosphere / rho_ - 1.0),
+                    rho_from_atmosphere < rho_ ? "high" : "low");
+      } else {
+        RCLCPP_INFO(this->get_logger(),
+                    "Baro density %.4f kg/m^3 from the standard atmosphere at %.0f m "
+                    "(the 'rho' parameter is unset, which is correct for flight).",
+                    rho_, init_alt_);
       }
     }
   } else {
@@ -344,6 +369,16 @@ void EstimatorROS::magnetometerCallback(const sensor_msgs::msg::MagneticField::S
   input_.mag_x = msg->magnetic_field.x;
   input_.mag_y = msg->magnetic_field.y;
   input_.mag_z = msg->magnetic_field.z;
+}
+
+void EstimatorROS::lioCallback(const nav_msgs::msg::Odometry::SharedPtr msg)
+{
+  // Not added to sensor monitoring: LIO is optional (use_lio), so a missing stream is not a
+  // fault unless it is enabled, and the bridge publishes nothing until it has aligned frames.
+  input_.lio_n = msg->pose.pose.position.x;
+  input_.lio_e = msg->pose.pose.position.y;
+  input_.lio_d = msg->pose.pose.position.z;
+  input_.lio_new = true;
 }
 
 void EstimatorROS::statusCallback(const rosflight_msgs::msg::Status::SharedPtr msg)

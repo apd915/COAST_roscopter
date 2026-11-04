@@ -72,8 +72,18 @@ ament_target_dependencies(sim_state_transcriber
   nav_msgs
   roscopter_msgs
   rosflight_msgs)
+add_executable(mock_lio_odometry
+  src/mock_lio_odometry.cpp
+)
+target_link_libraries(mock_lio_odometry Eigen3::Eigen)
+ament_target_dependencies(mock_lio_odometry
+  rclcpp
+  nav_msgs
+  rosflight_msgs)
+
 install(TARGETS
         sim_state_transcriber
+        mock_lio_odometry
         DESTINATION lib/${PROJECT_NAME})
 
 # Install other files

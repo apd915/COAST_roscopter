@@ -518,6 +518,23 @@ void ControllerCascadingPID::pass_to_firmware_controller(roscopter_msgs::msg::Co
     double equilibrium_throttle = params.get_double("equilibrium_throttle");
     double mass = params.get_double("mass");
     double gravity = params.get_double("gravity");
+    // KNOWN DEFECT, DELIBERATELY LEFT AS-IS.
+    //
+    // max_f is derived from the min_f written on the line above, not from min_throttle, so it
+    // comes out as the product of two force-scale terms: about +2370 N with these parameters,
+    // against an intended -21.1 N. The upper bound is therefore ~112x the vehicle's weight,
+    // i.e. effectively absent on the POSITIVE (downward, NED) side.
+    //
+    // Correcting it to -21.1 N was tried and REVERTED: the flight got worse, not better. The
+    // vehicle climbed higher and then stuttered while recovering, vertical error rose from
+    // ~0.78 m to 1.05 m and the peak from 2.6 m to 5.2 m. The tuning downstream evidently
+    // depends on the loose bound, so fixing the arithmetic in isolation is not safe -- it needs
+    // to be done together with a re-tune, and with the firmware mixer's saturation path
+    // understood (USE_MOTOR_PARAM is 1 here, so the mixer inverts prop physics on a force in
+    // Newtons; its own scale_factor = 1/max_output path may already be doing this job).
+    //
+    // Note for hardware: the firmware DEFAULT for USE_MOTOR_PARAM is 0, in which case the mixer
+    // treats this channel as normalised throttle and a ~34 N hover command would saturate.
     min_f = -mass * gravity / equilibrium_throttle * max_f; // Negative since NED
     max_f = -mass * gravity / equilibrium_throttle * min_f;
     input_cmd.cmd4 *= -1; // Thrust in the NED frame is negative

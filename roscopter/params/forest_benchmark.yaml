@@ -1,0 +1,393 @@
+# !! Editing this file is NOT enough. The launch files read the INSTALLED copy at
+# !! install/roscopter/share/roscopter/params/, so a change here does nothing until
+# !!     colcon build --packages-select roscopter
+# !! Three benchmark runs were flown at max_sfc_count 3 while this file said -1 because of
+# !! exactly that. Verify with:
+# !!     grep max_sfc_count install/roscopter/share/roscopter/params/forest_benchmark.yaml
+#
+# Kinodynamic limits matching SANDO's static-forest benchmark (Sec. IX-C), so travel time and
+# path length can be compared against their Table VI rather than only against our own baselines.
+#
+#   SANDO Sec. IX-C:  v_max 5.0 m/s, a_max 20.0 m/s^2, j_max 100.0 m/s^3
+#
+# Jerk is deliberately NOT limited here -- the QP has no jerk constraint block, so there is
+# nothing to set. Report rho_jerk as "n/a (not constrained)" rather than as 0%: claiming zero
+# violations of a constraint that was never enforced would be wrong, even though the measured
+# jerk may well be inside their bound.
+#
+# BOTH limits are per-axis (L-inf), which is what the MINVO constraint box enforces and what
+# SANDO enforces. Do not compare a vector norm against these numbers.
+#
+# EXPECT THIS TO BE AGGRESSIVE. a_max 20 m/s^2 is over 2 g, against our 0.49 m hull and 0.30 m
+# obstacle margin; SANDO's simulated vehicle has a 0.1 m radius. Tracking error grows with
+# commanded acceleration, and the corridor margin is what absorbs it, so watch tracking_error
+# and the arrival/collision behaviour before trusting a fast T_trav. If the vehicle cannot hold
+# the trajectory at these limits, that is a real result worth reporting -- not something to hide
+# by quietly lowering them.
+
+# VELOCITY SWEEP. The benchmark runs v_max in {2.0, 5.0, 8.0} with a_max fixed at 20.0, 10 seeds
+# x 3 densities each = 90 runs. v_max 5 / a_max 20 is SANDO's operating point (their Table VI),
+# so that row is the cross-paper comparison; 2 and 8 bracket it to show how the planner degrades
+# with speed, which is the axis a single-planner paper can report without needing their code.
+#
+# CHANGE IT HERE AND REBUILD. `ros2 launch ... --ros-args -p v_max:=8.0` does NOT work: the
+# params file wins over a command-line override, so the run flies 5.0 and nothing says otherwise.
+#   sed -i 's/^    v_max: .*/    v_max: 8.0/' src/roscopter/roscopter/params/forest_benchmark.yaml
+#   colcon build --packages-select roscopter
+# scripts/benchmark_run.sh refuses to print run commands unless the INSTALLED v_max matches the
+# one asked for, which is the only thing standing between a typo and an unusable batch.
+#
+# Verified safe at v_max 8: the buffered-trajectory collision check stays continuous to 9.40 m/s
+# (see the coverage note in minimum_snap_manager.cpp), and braking distance at a_max 20 is
+# 1.60 m against a 5 m corridor end-extension.
+/minimum_snap_manager:
+  ros__parameters:
+    v_max: 5.0
+    a_max: 20.0
+
+    # The default 10 m horizon is sized for the short legs of the shakeout mission. On a 105 m
+    # traverse it means the planner never looks more than ~1.5 trunk spacings ahead, so it cannot
+    # see around a cluster: it commits to a locally-clear line, discovers the cluster, and backs
+    # out. It also caps the terminal velocity, which is braking-bounded by the run-out at the end
+    # of the last corridor -- a short corridor chain means a slow hand-off to the next replan.
+    #
+    # 15 m is SANDO's value (sando.yaml: horizon 15.0) and it is a real ceiling, not a preference.
+    # 25 m with an 8000-node budget was tried and REVERTED: in a dense forest each replan grew to
+    # roughly 70 ms of the 100 ms period, and because the node runs on a SINGLE-THREADED executor
+    # (rclcpp::spin, one thread shared by the 10 Hz replan timer and the 50 Hz dispatch timer) the
+    # long replans starved setpoint publishing. Measured: trajectory_command fell from ~45 Hz to
+    # 15.4 Hz, north control error went from ~0.09 m to 0.818 m, and the vehicle drifted 1.34 m
+    # off the path laterally while along-track lag stayed at 0.057 m -- i.e. it was not behind the
+    # trajectory, it was being flown open-loop between setpoints.
+    #
+    # Raising the horizon past ~15 m therefore needs the executor fixed first (separate callback
+    # groups under a MultiThreadedExecutor, plus locking on setpoint_deque_/state_/shared_grid_),
+    # not just a bigger node budget.
+    # 15 m, matching BOTH SANDO's horizon (sando.yaml: horizon 15.0) and map_window_radius.
+    #
+    # Keeping these two equal matters: the horizon is where A* projects its goal, and the window
+    # is how far the map is retained. At horizon 25 against a 15 m window the far 10 m of every
+    # search ran through space the map had already pruned -- traversable, since unknown costs
+    # only unknown_traversal_cost, but with no obstacle information in it at all. The search was
+    # committing to routes through territory it could not see.
+    #
+    # 25 m was tried while chasing the narrow-corridor stalls and did not help them, which is
+    # consistent with their cause being a LOCAL MINIMUM rather than a lookahead shortfall: the
+    # goal is projected blindly along the straight line to the far waypoint, so a detour that
+    # needs to depart from that line is invisible at any horizon. Raising it only widens the
+    # window in which the same blind projection is made.
+    #
+    # Node budget back to 4000 to match the shorter horizon; expansion count grows with goal
+    # distance, and with the heat field in place A* now solves this in ~410 nodes.
+    # Padding on the trajectory's time budget:
+    #     T = time_budget_factor * max(L / v_max, 2*sqrt(L / a_max))
+    #
+    # T sizes the CONTROL POINT COUNT (unit knots, so points are seconds). Too tight and the QP
+    # cannot satisfy the pinned start/end state plus the MINVO velocity and acceleration bounds
+    # in the time allowed -- it returns primal-infeasible, and the retry loop adds a point per
+    # pool and re-solves. A FAILED solve costs the full max_iter, roughly 50x a successful one,
+    # so retries dominate the latency tail.
+    #
+    # Measured offline, 60 forests at 10% density, 1.20 -> 1.40:
+    #     first-attempt solves   60.2% -> 80.7%
+    #     OSQP p99               22.60 -> 17.09 ms   (-24%)
+    #     stalls                 16.7% -> 11.7%
+    #     commanded speed        2.52 -> 2.50 m/s    (-1%)
+    #
+    # Padding costs almost no speed because duration is FLOOR-dominated, not budget-dominated:
+    # the pool minimums (degree points per junction, >=1 exclusive per corridor) already exceed
+    # `required` in most cases, so the factor rarely binds. Lowering it therefore does NOT buy
+    # speed -- measured flat from 1.40 down to 0.90 -- it only costs first-attempt success.
+    time_budget_factor: 1.40
+
+    planning_horizon: 12.0
+    astar_max_nodes: 4000
+    astar_max_time_ms: 20.0
+
+    # Receding-horizon corridor cap. Was -1 (uncapped), which let the smoother emit as many
+    # corridors as the path had bends -- measured 1..14 over a 15 m horizon, median 3 (easy/
+    # medium) and 6 (hard).
+    #
+    # This is the single biggest lever on travel time, because corridor count and flight duration
+    # are coupled: every junction needs a "bridge" pool of `degree` (=4) control points so the
+    # curve can cross while staying inside BOTH boxes (convex-hull property), and under unit knots
+    # one control point IS one second. So each extra corridor buys four seconds of flight,
+    # regardless of how much distance it covers. At 8 corridors the split is 2 exclusive / 28
+    # bridge points -- 93% of the trajectory's duration is junction overhead. It is not an
+    # allocator bug: at 1-2 corridors the allocation is a correct 1.3x pad over the kinematic
+    # budget, and the over-allocation grows linearly with corridor count (3.3x at 3, 8.7x at 8,
+    # 14x at 12).
+    #
+    # Measured over 40 plans/level along the benchmark route, capping to 3 (front end + full QP,
+    # tools in the session log):
+    #                  v_eff [m/s]        mean [ms]      max [ms]      success
+    #   medium  -1  ->  1.13 -> 1.94      6.07 -> 3.12   42.9 -> 14.8   100% -> 100%
+    #   hard    -1  ->  0.77 -> 1.43     10.96 -> 4.77   45.4 -> 15.9    98% ->  98%
+    #   easy    -1  ->  1.66 -> 2.23
+    # (v_eff = planned path length / allocated duration, against v_max 5.0)
+    #
+    # Independent corroboration for capping: SANDO fixes its problem size outright at num_P: 3
+    # polytopes / num_N: 5 segments regardless of path complexity (config/sando.yaml:45-46),
+    # which is why their replan time is flat where ours grew with the map.
+    #
+    # Corridor MERGING was tried before capping and does NOT work -- a box spanning two segments
+    # is crushed to zero width by the obstacle on the inside of the bend (0 of 131 candidate
+    # merges accepted, widest 0.383 m against a 0.490 m hull, and independent of sfc_end_ext,
+    # which was the obvious suspect and was ruled out by sweeping it 5.0 -> 0.0 m).
+    #
+    # === FLOWN BASELINE: uncapped is extremely high-variance ===
+    # Four runs at max_sfc_count -1 on the SAME map and config (forest_medium):
+    #   run    mean[ms] max[ms]  T_trav[s]  L_path[m]  v_avg  S_jerk  >margin
+    #   A       10.84    35.22    148.30     166.85     1.13   257.30   59%
+    #   B        8.91    35.47     65.78     137.69     2.09   106.89   43%
+    #   C        9.43    35.08     63.88     135.80     2.13   103.97   70%
+    #   D       11.83    37.69     99.62     124.28     1.25    95.17   86%
+    #
+    # T_trav spans 2.3x at IDENTICAL configuration. The driver is stochastic junction
+    # indecision -- when several routes are near-equal in cost the planner commits, travels,
+    # and reverses, and whether that fires is not reproducible between runs.
+    #
+    # CONSEQUENCE FOR ANY A/B IN THIS WORKSPACE: a single run per configuration is worthless.
+    # A first cap-3 run measured T_trav 73.58 s, which sits INSIDE the uncapped range above
+    # (between B and D), so it separated nothing. Two earlier conclusions were drawn from
+    # single-run pairs and both were wrong. Replicate >= 3 runs per arm, and compare
+    # distributions.
+    #
+    # What IS reproducible and safe to quote: max replan (35.08-37.69 ms, +/-4%),
+    # rho_vel/rho_acc (0.00/0.00 in every run), v_inf (4.49-4.92 against a 5.0 limit).
+    # What is NOT: T_trav, L_path, v_avg, S_jerk, margin_exceeded.
+    #
+    # Offline (deterministic, 40 plans/level, fully-known map) favours capping at 3:
+    #   medium v_eff 1.13 -> 1.94 m/s, mean 6.07 -> 3.12 ms, max 42.9 -> 14.8 ms, success 100%
+    #   hard   v_eff 0.77 -> 1.43 m/s, mean 10.96 -> 4.77 ms, max 45.4 -> 15.9 ms, success 98%
+    # and the flown uncapped v_avg (1.13 median-ish) matches the offline uncapped prediction
+    # exactly, so the model is calibrated -- it simply cannot see the junction variance.
+    #
+    # Set back to -1 (uncapped). The cap-3 arm was run 3x and did separate cleanly on every
+    # metric -- but all three of those runs flew THROUGH obstacles, and shorter/faster is exactly
+    # what cutting through a trunk produces, so the comparison was confounded and is void. The
+    # corridor clearance bugs behind that are fixed (see dynamic_sfc.cpp relief, and the
+    # drone_physical_radius argument in front_end.cpp); re-run both arms before concluding
+    # anything about the cap.
+    # Minimum distance the corridor chain must cover. max_sfc_count counts CORRIDORS, not
+    # distance: threading a gap makes A* emit one-voxel segments, three of them can span under
+    # 2 m, every exclusive control-point pool zeroes out (a segment shorter than
+    # sfc_start_ext + sfc_end_ext gets none), and the chain ends where the vehicle already is.
+    # The QP then solves start-to-end, succeeds, and commands a hover -- forever, because the
+    # vehicle never moves to change the situation. Measured: T_trav 1662 s at 0.11 m/s.
+    # See the parameter declaration for the measured tradeoff -- 8.0 m with a 3x ceiling grew
+    # the chain to 9 corridors (32 bridge points, ~32 s of flight) and cost T_trav 150-158 s on
+    # hard s0, while 0 lets it collapse to a permanent hover on hard s1.
+    # Require the initial climb to be SETTLED, not just momentarily at altitude. Without this
+    # the vehicle departs diagonally the instant it passes 3 m and overshoots to 7-8 m, which is
+    # not in any corridor -- so the follower starts every run closing an error the planner never
+    # commanded, and the tracking numbers for the whole flight inherit it.
+    # Do not begin the traverse until the vehicle is AT waypoint altitude and essentially
+    # stationary. The waypoint is supposed to dictate where planning starts -- not the takeoff
+    # overshoot. Planning from above the canopy means planning on the worst map information in
+    # the flight (mostly unknown up there), and above max_altitude A* has a clear straight run
+    # to the goal, so it prefers to STAY high: measured, a 7.5 m start puts the whole chain at
+    # 6.25-7.50 m and an 8.5 m start gives ONE corridor over the entire forest.
+    takeoff_settle_speed: 0.30
+    takeoff_settle_timeout: 8.0
+
+    # A/B: does the A* geofence contain a vehicle sitting outside the altitude band?
+    # true  = it can plan (and recover) from up there -- but above 6 m trunks the forest is
+    #         empty, so A* will happily CRUISE the canopy instead of descending.
+    # false = pre-fix behaviour exactly; a vehicle above max_altitude cannot plan at all.
+    # Flip this to test whether the up-and-forward departure is this change.
+    geofence_contains_vehicle: false
+
+    # STALL HANDLING -- detection ON, termination OFF.
+    #
+    # stall_timeout  = how many seconds of no progress before a stall is DECLARED.
+    # stall_ends_run = whether declaring one ends the run.
+    #
+    # Termination is off because it was converting slow-but-recoverable runs into FAILs: hard
+    # s1 at v_max 5 hesitated at the same spot that terminated a v_max 8 run, then found its
+    # way through. With it off the run continues and you stop it by hand if it never recovers.
+    #
+    # Detection stays ON so the stall SNAPSHOT is still written -- that file is the only way to
+    # replay a stall offline (tools/replay_stall). Each episode gets its own file:
+    # /tmp/stall_snapshot.txt, then _1, _2, ... Set stall_timeout 0.0 to disable both.
+    stall_timeout: 45.0
+    stall_ends_run: false
+
+    min_chain_length: 4.0
+    max_sfc_count_hard: 5
+    max_sfc_count: 3
+
+    # ROUTE COMMITMENT (A/B). false = replan every cycle, the historical baseline.
+    # true = hold the plan until the buffered trajectory collides against the updated map, the
+    # plan exceeds commit_max_age, or the goal moves.
+    #
+    # Aimed at junction indecision: at v_max 8 the vehicle averaged 1.61 m/s -- 20% of the limit
+    # -- over 955 replans on a path 1.68x direct. Read the ROUTE CHURN block to judge it, not
+    # T_trav alone: travel time has 2.3x run-to-run spread at fixed configuration, so a single
+    # run separates nothing. Three runs per arm, minimum.
+    #
+    # Expect a travel-time regression to be POSSIBLE rather than surprising. Two earlier
+    # commitment mechanisms both lost, because holding a plan means flying a trajectory the
+    # control-point allocation made longer than the kinematics require. max_sfc_count 3 cut that
+    # over-allocation from ~9x to ~4x, which is why this is worth retrying -- not because the
+    # earlier objection went away.
+    commit_route: false
+    commit_max_age: 2.0
+
+    # DIRECTIONAL GATE (the fourth attempt at the junction problem, and the only one that does
+    # not freeze geometry). 0 disables it.
+    #
+    # Every cycle still plans in full and every accepted plan is fresh, so the vehicle keeps
+    # flying trajectory openings rather than tails -- which is what cost plan-level commitment
+    # 34% on the median -- and no held route can go stale against a drifting state estimate,
+    # which is what made route-chain commitment catastrophic (T_trav med 484 s, 18 collisions in
+    # one run). The only change is that a candidate whose near-field heading disagrees with the
+    # route being flown is declined, with a collision override and a rejection bound.
+    #
+    # Baseline to beat, hard s0 at v_max 8, no commitment: T_trav 74 / 101 / 405 s. Success is
+    # no run near 405 s with the median still around 100 s. Read the angle distribution in the
+    # DIRECTIONAL GATE block before changing the threshold: if p90 is well under it the gate is
+    # inert, and if streaks reach the bound it is too tight.
+    route_reject_angle_deg: 35.0
+
+    # How much better aimed at the goal a candidate must be to BYPASS the directional gate.
+    # 0.10 is the historical value and what all ten benchmark seeds were flown at.
+    # RAISED TO 0.40 to test on s4, which fails reproducibly (2 of 2). Anything collected at
+    # 0.40 is NOT comparable with the ten-seed set -- revert to 0.10 before collecting again.
+    #
+    # Raising it makes a genuine tie get DECLINED and held instead of flipping. Across the
+    # medium seeds this override was used 0-43 times on passing runs and 213 times on s4, which
+    # wedged (642 m on a 105 m route, 6 collisions). Test on s4 before changing it generally --
+    # too high and one bad plan becomes self-defending, which is what the override prevents.
+    route_alignment_margin: 0.10
+    route_reject_lookahead_m: 3.0
+    route_reject_max_consecutive: 10
+
+    # Unknown space costs (1 + c) per step against 1 for measured-free, so A* prefers a detour
+    # through mapped space over a direct route through unknown whenever the detour is shorter
+    # than (1 + c) times the direct path. At the default c = 2.0 that tolerance is 3x, which is
+    # far too generous for forward flight: the space AHEAD is always the least-sampled part of
+    # the map, so the search is pushed sideways and backwards into the well-mapped region the
+    # vehicle has already flown through.
+    #
+    # It is not a small effect here. The LiDAR's 3 deg vertical rings are 0.79 m apart at 15 m
+    # and 1.05 m at 20 m, wider than the 0.5 m voxel, so beyond ~10 m the forward volume is
+    # mostly UNKNOWN however long the vehicle has been flying. Measured symptom: A* exhausted its
+    # full 4000-node budget and returned a 14-cell (6.4 m) partial path against a 15 m horizon,
+    # the trajectory was then sized for 6.4 m, and the vehicle crept forward and eventually flew
+    # backwards -- the search had found that retreating through mapped space scored better.
+    #
+    # 0.5 keeps a real preference for measured-free space (a 1.5x detour still wins) without
+    # making forward progress uncompetitive.
+    # Metres of OCCUPANCY marked behind each LiDAR return. 0 = off (one cell per beam).
+    #
+    # OFF BY DEFAULT, on measurement. Implemented and tested (test_occupancy_thickness.cpp);
+    # the numbers below are why it is not switched on.
+    #
+    # WHAT IT FIXES. A beam marks only the cell it ends in, so the far side of every obstacle is
+    # sensor shadow -- never observed, hence UNKNOWN, hence not blocked. Inflation covers most
+    # of a trunk anyway: on a 1.3 m trunk, 18 of 20 interior cells are ALREADY inflated-blocked
+    # with this off. The fill closes the remaining 2 -- the deepest cells -- which matters
+    # because a corridor built in that shadow is clipped by nothing and can reach ~0.5 m into
+    # solid wood against a 0.49 m hull.
+    #
+    # WHAT IT COSTS. It quadruples raw occupancy inside obstacles (3 -> 12 of 20 cells at 1.0 m),
+    # and the derived-structure rebuild stamps a 5x5x5 inflation box per occupied voxel plus a
+    # KD-tree over the result. Measured on a 6480-return scan: update_from_scan +27% at 0.5 m,
+    # +31% at 1.0 m, +65% at 2.0 m. Map update is already the component starving the 50 Hz
+    # dispatch loop (trajectory_command arriving at ~34 Hz against 50).
+    #
+    # NOT what makes the planner aim into blocked space: A* cannot cross a trunk even with this
+    # off -- inflation stops it, and get_obstacles_in_radius returns the same inflated set, so
+    # the corridor builder sees it too. That cause is still open.
+    #
+    # 0.5 already closes all 20 cells on a 1.3 m trunk, so prefer 0.5 over 1.0 if enabling.
+    occupancy_thickness: 0.0
+
+    # Degenerate-corridor repair, metres of lateral half-width. 0 disables.
+    # A collapsed corridor is infeasible (control points cannot curve on a pinned axis), not
+    # unsafe -- the box is already inset by hull + margin and the trajectory tracks the centre
+    # of mass. Measured over 25 paired Monte-Carlo forests at 20% density, v5:
+    #   0.00 -> 68% goal-reach / 32% stall      0.15 -> 92% / 8%   <-- default
+    #   0.05 -> 76% / 24%                       0.30 -> 84% / 16%  (over-merges)
+    sfc_min_usable_width: 0.15
+
+    unknown_traversal_cost: 0.5
+
+    # Worst per-axis constraint violation, in the constraints' own units, at which a
+    # non-converged OSQP iterate is still flown. 0.0147 m/s of velocity error against a 5.0 m/s
+    # limit is 0.3% -- flyable by any measure -- but the default 1e-2 rejected it and burned the
+    # whole retry budget. Loosened to sit above that observed residual while staying negligible
+    # against the corridor margin.
+    qp_accept_violation: 0.02
+
+    # Keep the accumulated map no larger than the planner actually reads. The per-scan rebuild of
+    # the inflated set and KD-tree costs O(occupied voxels), which scales with window AREA, and
+    # at the 25 m default it measured 90 ms/scan rising to 117 ms as the forest map filled --
+    # against a 100 ms period, on the same thread as the 50 Hz dispatch loop. Nothing past
+    # NOTE, 2026-09-25: the reasoning below is INVERTED and the value is now suspect. The map
+    # must extend PAST the horizon, not match it: the sub-goal is projected at exactly
+    # planning_horizon, and nothing beyond map_window_radius is retained (update_from_scan
+    # clamps its sweep, drops returns past it, and prune_to_window deletes the rest). With both
+    # at 15 m the local goal sat exactly on the frontier every cycle -- measured on hard s0 v5,
+    # the goal cell was `unknown` in 137 of 137 short-path diagnostics. planning_horizon has
+    # been cut to 10 m to restore the margin; raising this to 25 is the other way, at map-update
+    # CPU that is already the bottleneck.
+    # planning_horizon (15 m) is used, so the extra 10 m of radius was pure cost: 25 -> 15 m cuts
+    # the occupied count to roughly 36% of it.
+    map_window_radius: 15.0
+
+    # Clearance demanded BEYOND the vehicle hull. Obstacles are inflated by
+    # (drone_physical_radius + obstacle_margin), so the corridor -- and therefore the reference
+    # trajectory -- is held that far off the obstacle surface.
+    #
+    # 0.30 -> 0.20 to open the pinches that were leaving corridors at zero half-width and making
+    # the QP primal-infeasible on geometry. Required gap drops 1.58 -> 1.38 m, and the inflation
+    # stamp shrinks 5^3=125 to 4^3=64 cells per occupied voxel, which roughly halves the map
+    # rebuild cost as a bonus.
+    #
+    # 0.20 matches SANDO's hardware value against a near-identical vehicle (r_drone 0.45 +
+    # r_margin 0.20; ours is 0.49 + 0.20). But be clear about what is being traded: the earlier
+    # budget analysis put the requirement at ~0.35-0.45 m to cover tracking error plus the
+    # estimator decorrelation between mapping a cell and flying past it. 0.20 is BELOW that, so
+    # this buys solvability with safety margin. Watch tracking_error's margin_exceeded and the
+    # collision count on mock_env/collision, and treat any contact as this being too small
+    # rather than as noise.
+    obstacle_margin: 0.20
+
+    # Altitude ceiling, m above ground. Equals the trunk height, so overflight is impossible
+    # rather than merely unattractive -- matching SANDO's z_max (6.0 m, also its trunk height).
+    #
+    # Without it the only upward bound was map_bounds.z/2 = 7.5 m, and the 6 m trunks inflate to
+    # 6.69 m: A* threaded that 0.81 m window, climbing 4.14 -> 7.24 m and diving back at 77 deg.
+    # The corridor chain for that manoeuvre (14 -> 0 -> 45 -> 77 deg) turns too sharply for
+    # consecutive OBBs to share volume, so the QP failed on the corridor block even with healthy
+    # corridor widths.
+    #
+    # The generator sizes trunks against the cruise altitude precisely so that HORIZONTAL
+    # avoidance is what the benchmark measures; this enforces that rather than assuming it.
+    max_altitude: 6.0
+
+    # Altitude FLOOR for A*, metres above ground. <0 = auto (drone radius + 0.1 = 0.59 m).
+    #
+    # -1.0 preserves the historical behaviour. The auto value is a CLEARANCE limit acting as a
+    # flight limit: cruise is 3.0 m, so it leaves a 2.4 m band the search may sag into, and
+    # nothing penalises altitude (the QP minimises snap; corridor z half-extents reach ~2 m).
+    # Each replan starts from wherever the last sagged to, so the descent ratchets -- observed
+    # as the vehicle traversing near the floor, and captured in a stall snapshot at 0.82 m.
+    #
+    # Try 2.0 to bound the band to 2.0-6.0 m around the 3.0 m cruise.
+    min_altitude: -1.0
+
+    # Discount on the A* step cost for cells on the previously committed route. 0 disables.
+    #
+    # An offline junction sweep (tests/test_path_hysteresis.cpp) measured side-flips over six
+    # adversarial replans: 0.00 -> 5 flips, 0.10-0.20 -> 1, 0.30 -> 0, 0.50 -> 0 but with A*
+    # expansions collapsing from 255 to 77, i.e. the search following the old route rather than
+    # evaluating alternatives. 0.30 is the point where flipping stops without that.
+    #
+    # To A/B this, edit the value here and rebuild (colcon picks the yaml up in ~5 s), or point
+    # the planner_param_file launch argument at a second file. NOTE: `ros2 launch` does not
+    # accept `--ros-args -p` to override a node parameter that a params file has already set --
+    # the file wins.
+    path_hysteresis_bonus: 0.0

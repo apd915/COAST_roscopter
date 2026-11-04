@@ -3,7 +3,24 @@
 
       # Node Params
       estimator_update_frequency: 390.0
-      rho: 1.225
+      # Air density used to convert barometric pressure into altitude
+      # (estimator_continuous_discrete.cpp: h = -rho*g*p_d).
+      #
+      # LEAVE THIS DISABLED. estimator_ros.cpp already computes the correct local density from
+      # the standard atmosphere at the GPS init altitude; a POSITIVE value here overrides that
+      # calculation, and any mismatch becomes a pure SCALE ERROR on altitude -- not an offset.
+      # The controller then drives the (mis-scaled) estimate onto the commanded altitude, so the
+      # vehicle settles proportionally high, and the error grows linearly with altitude.
+      #
+      # 1.225 is sea level. At the 1387 m origin_altitude used by the standalone sim the true
+      # density is 1.0699, so 1.225 read altitudes 12.7% low and the vehicle flew high by:
+      #     4 m cmd -> 0.58 m,  10 m -> 1.45 m,  30 m -> 4.35 m
+      # Measured signed vertical error before this fix: +0.693 m at 4 m commanded, consistently
+      # ABOVE the trajectory across every run -- systematic, not the estimator's random walk.
+      #
+      # This is NOT sim-only: the same error appears on hardware at any elevation off sea level.
+      # Set it only to pin a known density for a bench test, and never leave it set for flight.
+      # rho: 1.225
       gravity: 9.81
       gps_ground_speed_threshold: 0.3
       baro_measurement_gate: 1.35
