@@ -160,8 +160,35 @@ install(
   DESTINATION lib/${PROJECT_NAME})
 
 # Minimum Snap Engine
+#
+# Location of the COAST repo (https://github.com/byu-magicc/coast). Resolution order:
+#   1. -DCOAST_DIR=/path/to/coast   (e.g. colcon build --cmake-args -DCOAST_DIR=...)
+#   2. the COAST_DIR environment variable
+#   3. auto-detected: a "coast" or "Minimum-Snap-Trajectories" checkout next to this repo
+#      or in the workspace root, or the legacy ~/Documents/B-Splines/... location
+if(NOT COAST_DIR AND DEFINED ENV{COAST_DIR})
+  set(COAST_DIR "$ENV{COAST_DIR}")
+endif()
+if(NOT COAST_DIR)
+  find_path(COAST_DIR
+    NAMES cpp/CMakeLists.txt cpp/include
+    PATHS
+      ${CMAKE_CURRENT_SOURCE_DIR}/../..        # <ws>/src
+      ${CMAKE_CURRENT_SOURCE_DIR}/../../..     # <ws>
+      $ENV{HOME}/Documents/B-Splines/bspline_generator
+    PATH_SUFFIXES coast Minimum-Snap-Trajectories
+    NO_DEFAULT_PATH)
+endif()
+set(COAST_DIR "${COAST_DIR}" CACHE PATH "Path to the COAST (byu-magicc/coast) repository")
+if(NOT EXISTS "${COAST_DIR}/cpp/CMakeLists.txt")
+  message(FATAL_ERROR
+    "COAST not found (COAST_DIR='${COAST_DIR}'). Clone https://github.com/byu-magicc/coast "
+    "and pass -DCOAST_DIR=/path/to/coast or export COAST_DIR=/path/to/coast.")
+endif()
+message(STATUS "roscopter: using COAST from ${COAST_DIR}")
+
 set(BUILD_PYTHON_BINDINGS OFF)
-add_subdirectory(/home/apd915/Documents/B-Splines/bspline_generator/Minimum-Snap-Trajectories/cpp minimum_snap)
+add_subdirectory(${COAST_DIR}/cpp minimum_snap)
 
 # min_snap_engine is a STATIC library -- it is linked into minimum_snap_manager at build
 # time, so there is nothing to install and nothing to find at runtime. Installing it as a
@@ -174,7 +201,7 @@ add_executable(minimum_snap_manager
 ament_target_dependencies(minimum_snap_manager rclcpp rclpy roscopter_msgs std_srvs sensor_msgs nav_msgs visualization_msgs rosflight_msgs)
 target_link_libraries(minimum_snap_manager ${ament_LIBRARIES} param_manager ${YAML_CPP_LIBRARIES} min_snap_engine)
 target_include_directories(minimum_snap_manager PUBLIC 
-  /home/apd915/Documents/B-Splines/bspline_generator/Minimum-Snap-Trajectories/cpp/include
+  ${COAST_DIR}/cpp/include
 )
 install(
   TARGETS minimum_snap_manager
