@@ -1,4 +1,5 @@
 #include <rclcpp/rclcpp.hpp>
+#include <ament_index_cpp/get_package_share_directory.hpp>
 #include <sensor_msgs/msg/point_cloud2.hpp>
 #include <sensor_msgs/point_cloud2_iterator.hpp>
 #include <roscopter_msgs/msg/state.hpp>
@@ -116,8 +117,19 @@ public:
 
     MinimumSnapManager() : Node("minimum_snap_manager") {
         // 1. Declare Parameters
-        this->declare_parameter("dynamics_file", "/home/apd915/rosflight_ws/src/rosflight_ros_pkgs/rosflight_sim/params/multirotor_dynamics.yaml");
-        this->declare_parameter("sensor_config_file", "/home/apd915/rosflight_ws/src/rosflight_ros_pkgs/rosflight_sim/simulators/standalone_sim/params/standalone_sim_params.yaml");
+        // Defaults come from the installed rosflight_sim package, so they resolve in any
+        // workspace regardless of what the rosflight_ros_pkgs checkout is named.
+        std::string rosflight_sim_params;
+        try {
+            rosflight_sim_params =
+                ament_index_cpp::get_package_share_directory("rosflight_sim") + "/params/";
+        } catch (const std::exception &e) {
+            RCLCPP_WARN(this->get_logger(),
+                        "rosflight_sim not found (%s); set dynamics_file and sensor_config_file explicitly.",
+                        e.what());
+        }
+        this->declare_parameter("dynamics_file", rosflight_sim_params + "multirotor_dynamics.yaml");
+        this->declare_parameter("sensor_config_file", rosflight_sim_params + "standalone_sim_params.yaml");
         this->declare_parameter("v_max", 3.0);
         this->declare_parameter("a_max", 2.0);
         // Minimum ground distance the truncated corridor chain must cover. max_sfc_count counts

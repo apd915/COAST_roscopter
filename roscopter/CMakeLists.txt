@@ -198,7 +198,7 @@ add_subdirectory(${COAST_DIR}/cpp minimum_snap)
 # Minimum Snap Manager
 add_executable(minimum_snap_manager
   src/navigation/minimum_snap_manager.cpp)
-ament_target_dependencies(minimum_snap_manager rclcpp rclpy roscopter_msgs std_srvs sensor_msgs nav_msgs visualization_msgs rosflight_msgs)
+ament_target_dependencies(minimum_snap_manager rclcpp rclpy ament_index_cpp roscopter_msgs std_srvs sensor_msgs nav_msgs visualization_msgs rosflight_msgs)
 target_link_libraries(minimum_snap_manager ${ament_LIBRARIES} param_manager ${YAML_CPP_LIBRARIES} min_snap_engine)
 target_include_directories(minimum_snap_manager PUBLIC 
   ${COAST_DIR}/cpp/include
